@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Net;  //basic function for ip adressing
 using System.Net.Sockets; //ne ed to tightly control access to the network. Needed for TcpClient class 
@@ -571,7 +571,7 @@ namespace CMMTt111
             NoOW = OW; //extended OW
 
             numRegIW = 12 + NoIW;
-            numRegOW = 12 + NoIW;
+            numRegOW = 12 + NoOW;
 
             IAsyncResult ar = myTcpClient.BeginConnect(myIpAddress, 502, null, null);
             System.Threading.WaitHandle wh = ar.AsyncWaitHandle;
@@ -587,10 +587,24 @@ namespace CMMTt111
                     throw new TimeoutException("Connection not possible!\nWrong IP-Address? Wrong Port number?");
                 }
                 myTcpClient.EndConnect(ar);
-                myTcpClient.ReceiveTimeout = 20; //Socket timeout
-                myTcpClient.SendTimeout = 20; //Socket timeout
+                // Be conservative with timeouts; short timeouts cause false disconnects over long runtimes.
+                myTcpClient.NoDelay = true;
+                try
+                {
+                    myTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                }
+                catch { }
+
+                myTcpClient.ReceiveTimeout = 2000; // ms
+                myTcpClient.SendTimeout = 2000; // ms
 
                 myStream = myTcpClient.GetStream();
+                try
+                {
+                    myStream.ReadTimeout = 2000;  // ms
+                    myStream.WriteTimeout = 2000; // ms
+                }
+                catch { }
 
                 connected = true;
                 connectionError = false;
@@ -681,7 +695,7 @@ namespace CMMTt111
                     myStream.Dispose();
                 }
                 catch { }
-                Connect(myIpAddress, NoIW, NoIW);
+                Connect(myIpAddress, NoIW, NoOW);
                 //Reset counter
                 icountReadmb = 0;
                 icountWritemb = 1;
