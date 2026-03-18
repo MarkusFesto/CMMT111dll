@@ -117,6 +117,8 @@ namespace CMMTt111
         private DateTime nextReconnectAttemptUtc = DateTime.MinValue;
         private int reconnectBackoffMs = 250;
         private const int ReconnectBackoffMaxMs = 5000;
+        private DateTime lastModbusTimeoutUpdateUtc = DateTime.MinValue;
+        private const int ModbusTimeoutUpdateIntervalMs = 1000;
 
         #endregion
 
@@ -1196,7 +1198,6 @@ namespace CMMTt111
 
         private void WritembThread()
         {
-            bool xTurn = false;
             //int iWaitRead = 1;
             while (!exitApplication)
             {
@@ -1231,16 +1232,29 @@ namespace CMMTt111
 
                 if (connected & !connectionError)
                 {
-                    if (!xTurn)
-                    { 
-                        readInput(); 
-                    }
-                    else
+                    // Prioritize output writes to avoid drive watchdog trips.
+                    // Reads are best-effort; a slow/missed read must not stop cyclic writes.
+                    // Do modbus-timeout register update only occasionally,
+                    // so it can't block cyclic output writes too long.
+                    try
                     {
-                        if (!updateModbusTimeOut()) writeOutput();
+                        if ((DateTime.UtcNow - lastModbusTimeoutUpdateUtc).TotalMilliseconds >= ModbusTimeoutUpdateIntervalMs)
+                        {
+                            updateModbusTimeOut();
+                            lastModbusTimeoutUpdateUtc = DateTime.UtcNow;
+                        }
                     }
-                    xTurn = !xTurn;
+                    catch { }
+
+                    writeOutput();
                     icountWritemb++;
+
+                    // Best-effort read (do not let read problems stop the output cycle)
+                    try
+                    {
+                        readInput();
+                    }
+                    catch { }
                 }
 
                 // the thread is paused for 50 milliseconds
@@ -1748,6 +1762,18 @@ namespace CMMTt111
                 // Count successful responses
                 icountReadmb++;
                 return true;
+            }
+            catch (IOException ex)
+            {
+                LogData("Exception in SendAndProcessResponse: " + ex.Message);
+                // Reads timing out should not immediately drop cyclic outputs; treat as best-effort.
+                if (expectedFunctionCode == 4 || expectedFunctionCode == 3)
+                {
+                    return false;
+                }
+
+                retryConnection();
+                return false;
             }
             catch (Exception ex)
             {
