@@ -190,7 +190,10 @@ namespace CMMTt111
         public int SetReadTimeOut
         {
             get { return setReadTimeOut; }
-            set { if (value >= 10) { setReadTimeOut = value; } else { setReadTimeOut = 10; } }
+            // Prevent overly aggressive read timeouts that lead to false reconnects and
+            // (worse) drive process-data watchdog faults.
+            // This library is intended for cyclic Modbus process data; 100ms can be too low.
+            set { if (value >= 1000) { setReadTimeOut = value; } else { setReadTimeOut = 1000; } }
         }
         public int ActualReadTime { get { return actualReadTime; } }
         public int ActualCycleTime { get { return actualCycleTime; } }
