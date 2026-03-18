@@ -113,6 +113,10 @@ namespace CMMTt111
         private bool ThreadStarted = false;
         private bool disconnecting = false;
         private bool exitApplication = false;
+        private bool reconnectRequested = false;
+        private DateTime nextReconnectAttemptUtc = DateTime.MinValue;
+        private int reconnectBackoffMs = 250;
+        private const int ReconnectBackoffMaxMs = 5000;
 
         #endregion
 
@@ -152,7 +156,7 @@ namespace CMMTt111
         private int cycleTime = 15;
         private int modbusTimeOut = 1000;
         private int modbusTimeOutCurrent = 0;
-        private int setReadTimeOut = 100;
+        private int setReadTimeOut = 1000;
         private int actualReadTime = 0;
         private int actualCycleTime = 0;
         private int actualWritembTime = 0;
@@ -612,6 +616,9 @@ namespace CMMTt111
 
                 connected = true;
                 connectionError = false;
+                reconnectRequested = false;
+                reconnectBackoffMs = 250;
+                nextReconnectAttemptUtc = DateTime.MinValue;
 
                 status = "Connected"; //+ iRetryConnection.ToString();
                 LogData(status + "[" + iretryConnection.ToString() + "]");
@@ -631,11 +638,12 @@ namespace CMMTt111
             }
             catch //(Exception ex)
             {
-                if (!connected)
-                {
-                    status = "Can't connect";
-                    LogData(status);
-                }          
+                connected = false;
+                connectionError = true;
+                status = "Can't connect";
+                LogData(status);
+                reconnectRequested = true;
+                nextReconnectAttemptUtc = DateTime.UtcNow.AddMilliseconds(reconnectBackoffMs);
             }
             finally
             {
@@ -663,7 +671,8 @@ namespace CMMTt111
         int iretryConnection2 = 0;
         private void retryConnection()
         {
-            connectionError = true; 
+            connectionError = true;
+            connected = false;
             iretryConnection++;
             iretryConnection2++;
             LogData("AutoConnect[" + iretryConnection + "]");
@@ -683,8 +692,8 @@ namespace CMMTt111
             }
             else
             {
-                //With retry
-                status = "Connection retry: " + iretryConnection.ToString() + Environment.NewLine;
+                // With retry: close socket now; worker thread will reconnect with backoff
+                status = "Connection retry scheduled: " + iretryConnection.ToString() + Environment.NewLine;
                 try
                 {
                     myTcpClient.Close();
@@ -692,12 +701,38 @@ namespace CMMTt111
                     myStream.Dispose();
                 }
                 catch { }
+                reconnectRequested = true;
+                nextReconnectAttemptUtc = DateTime.UtcNow.AddMilliseconds(reconnectBackoffMs);
+                reconnectBackoffMs = Math.Min(ReconnectBackoffMaxMs, reconnectBackoffMs * 2);
+            }
+        }
+
+        #endregion
+
+        #region Reconnect state machine (worker-thread owned)
+
+        private void TryReconnectIfDue()
+        {
+            if (!reconnectRequested) return;
+            if (DateTime.UtcNow < nextReconnectAttemptUtc) return;
+            if (string.IsNullOrWhiteSpace(myIpAddress)) return;
+
+            // Reset counters on a new reconnect attempt window
+            icountReadmb = 0;
+            icountWritemb = 1;
+            maxRWGap = 0;
+            maxTIDGap = 0;
+
+            try
+            {
                 Connect(myIpAddress, NoIW, NoOW);
-                //Reset counter
-                icountReadmb = 0;
-                icountWritemb = 1;
-                maxRWGap = 0;
-                maxTIDGap = 0;
+            }
+            catch
+            {
+                // Connect() already sets flags; schedule next attempt
+                reconnectRequested = true;
+                nextReconnectAttemptUtc = DateTime.UtcNow.AddMilliseconds(reconnectBackoffMs);
+                reconnectBackoffMs = Math.Min(ReconnectBackoffMaxMs, reconnectBackoffMs * 2);
             }
         }
 
@@ -1165,9 +1200,37 @@ namespace CMMTt111
             //int iWaitRead = 1;
             while (!exitApplication)
             {
+                // Handle explicit disconnect first
+                if (disconnecting)
+                {
+                    connected = false;
+                    connectionError = false;
+                    reconnectRequested = false;
+                    status = "Disconnected";
+                    try
+                    {
+                        myTcpClient.Close();
+                        myStream.Close();
+                        myStream.Dispose();
+                        disconnecting = false;
+                        LogData("Disconnected");
+                        CreateLogFile();
+                    }
+                    catch { }
+                    Thread.Sleep(50);
+                    continue;
+                }
+
+                // Reconnect loop (keeps trying until it succeeds)
+                if (!connected || connectionError || reconnectRequested)
+                {
+                    TryReconnectIfDue();
+                    Thread.Sleep(Math.Max(50, cycleTime));
+                    continue;
+                }
+
                 if (connected & !connectionError)
                 {
-
                     if (!xTurn)
                     { 
                         readInput(); 
@@ -1188,25 +1251,6 @@ namespace CMMTt111
                 //Thread.Sleep(cycleTime * iWaitRead);
 
                 Thread.Sleep(cycleTime);
-
-                #region Disconnecting..
-                if (disconnecting)
-                {
-                    connected = false;
-                    connectionError = false;
-                    status = "Disconnected";
-                    try
-                    {
-                        myTcpClient.Close();
-                        myStream.Close();
-                        myStream.Dispose();
-                        disconnecting = false;
-                        LogData("Disconnected");
-                        CreateLogFile();
-                    }
-                    catch { }
-                }
-                #endregion
 
                 #region Actual Writemb Time
                 endWritemb = DateTime.Now;
@@ -1609,247 +1653,7 @@ namespace CMMTt111
 
         // NOTE: Legacy read thread has been replaced by synchronous request/response handling
 
-        #region Read Modbus Responses
-        private void readmbResponses()
-        {           
-            int i = 0;
-            bool xReadTimeOut = false;
-            byte[] bAnswer = new byte[400]; //new byte[400];
-
-            #region Check myStream.DataAvailable
-            DateTime start = DateTime.Now;
-            DateTime end;
-            TimeSpan ReadTime;
-
-            while (!myStream.DataAvailable)
-            {
-                end = DateTime.Now;
-                ReadTime = end - start;
-                actualReadTime = Convert.ToInt32(ReadTime.TotalMilliseconds);
-                if (actualReadTime >= setReadTimeOut)
-                {
-                    counterPass++;
-                    LogData("(Read) Read Time Out: " + setReadTimeOut.ToString()); //+ " | ART:" + actualReadTime.ToString() + " | CNT:" + counterPass.ToString());
-                    maxReadTime = 0;
-                    retryConnection();
-                    xReadTimeOut = true;
-                    break;
-                }
-            }
-            if (actualReadTime > maxReadTime) { maxReadTime = actualReadTime; LogData("MRT = " + maxReadTime); }
-            #endregion
-
-            #region Read data from CMMT
-            if (!xReadTimeOut)
-            {
-                if (myStream.DataAvailable)
-                {
-                    //Check incoming data
-                    #region Check incoming data
-                    try
-                    {
-                        while (i < 8) //bAnswer[7] = 04 --> read input register --> input
-                                      //bAnswer[7] = 10 --> write holding register --> output
-                                      //bAnswer[7] = 03 --> read holding register --> modbus time out
-
-                        {
-                            i += myStream.Read(bAnswer, i, bAnswer.Length);
-                        }
-                        end = DateTime.Now;
-                        ReadTime = end - start;
-                        actualReadTime = Convert.ToInt32(ReadTime.TotalMilliseconds);
-                        tIDRead = GetWord(bAnswer[0],bAnswer[1]);
-                    }
-                    catch
-                    {
-                        LogData("(Read) ART: " + actualReadTime.ToString() + " | Data Available but Exception");
-                        retryConnection();
-                    }
-                    #endregion 
-
-                    // Read input 
-                    #region bAnswer[7] == 04 [hex] --> read input register --> input
-                    if (bAnswer[7] == 4)  
-                    {
-                        #region Data to receive
-                        //Data to receive after read input register
-                        //0  1  2  3  4  5  6  7  8  9  
-                        //XX XX XX XX XX XX XX XX XX XX XX XX ....
-                        //Tid   Pid   Len   id fn ln data
-
-                        //Tid   --> 00 01 auto increment
-                        //Pid   --> 00 00
-                        //Len   --> 00 06
-                        //id    --> FF
-                        //fn    --> 04
-                        //Len   --> 00
-                        //data  --> 00 00 ... (as len) 
-                        #endregion
-                        try
-                        {
-                            while (i < 9 + numRegIW * 2) //9 = header
-                            {
-                                i += myStream.Read(bAnswer, i, bAnswer.Length);
-                            }
-                        }
-                        catch //(Exception ex)
-                        {
-                            LogData("1-Exception while reading input");
-                            retryConnection();
-                        }
-
-                        string sAnswer = GetHexStringfromArrayByte(bAnswer, i);
-                        statusRead = statusRead + "Answer read: " + sAnswer + Environment.NewLine;
-
-                        #region Store data to InW
-
-                        int FirstData = 9; //first data
-                        for (byte j = 0; j < bAnswer[8] / 2; j++)
-                        {
-                            inW[j] = GetWord(bAnswer[FirstData], bAnswer[FirstData + 1]);
-                            FirstData = FirstData + 2;
-                        }
-                        readInW(); //store data to variable
-
-                        #endregion
-                    }
-                    #endregion
-
-                    //Response from write output 
-                    #region bAnswer[7] == 10 [hex] --> write holding register --> output
-                    else if (bAnswer[7] == 16)
-                    {
-
-                        #region Data to receive
-                        //Data to receive after write holding register
-                        //0  1  2  3  4  5  6  7  8  9  10 11
-                        //XX XX XX XX XX XX XX XX XX XX XX XX ....
-                        //Tid   Pid   Len   id fn Offst #reg
-
-                        //Tid   --> 00 01 auto increment
-                        //Pid   --> 00 00
-                        //Len   --> 00 06
-                        //id    --> FF
-                        //fn    --> 10      --> function code 16
-                        //Offst --> 00 00
-                        //#reg  --> 00 0C   --> basic numReg = 12
-                        #endregion
-                        if (myStream.DataAvailable)
-                        {
-                            try
-                            {
-                                while (i < 12) // (i < 12)
-                                {
-                                    i += myStream.Read(bAnswer, i, bAnswer.Length);
-                                }
-                                end = DateTime.Now;
-                                ReadTime = end - start;
-                            }
-                            catch //(Exception ex)
-                            {
-                                LogData("2-Exception while reading response from writing output");
-                                retryConnection();
-                            }
-
-                            string sAnswer = GetHexStringfromArrayByte(bAnswer, i);
-                            statusWrite = statusWrite + "Answer write: " + sAnswer;
-
-                        }
-                    }
-                    #endregion
-
-                    // Response from read modbus time out
-                    #region bAnswer[7] == 03 [hex] --> read holding register --> modbus time out
-                    else if (bAnswer[7] == 3) // = 03 [hex] --> read holding register --> modbus time out
-                    {
-                        #region Data to receive
-                        //Data to receive after read input register
-                        //0  1  2  3  4  5  6  7  8  9  
-                        //XX XX XX XX XX XX XX XX XX XX XX XX ....
-                        //Tid   Pid   Len   id fn ln data
-
-                        //Tid   --> 00 01 auto increment
-                        //Pid   --> 00 00
-                        //Len   --> 00 05
-                        //id    --> FF
-                        //fn    --> 03
-                        //Len   --> 00
-                        //data  --> 00 00 ... (as len) 
-                        #endregion
-                       
-                        try
-                        {
-                            while (i < 11) //9 = header
-                            {
-                                i += myStream.Read(bAnswer, i, bAnswer.Length);
-                            }
-                        }
-                        catch //(Exception ex)
-                        {
-                            LogData("3-Exception while reading response from read modbus timeout");
-                            retryConnection();
-                        }
-                        string sAnswer = GetHexStringfromArrayByte(bAnswer, i);
-                        statusRead = statusRead + "Answer read: " + sAnswer + Environment.NewLine;
-
-                        #region Store data to modbusTimeOut  
-                        
-                        int FirstData = 9; //first data
-                        modbusTimeOutCurrent = GetWord(bAnswer[FirstData], bAnswer[FirstData + 1]);  
-                        
-                        #endregion
-                    }
-                    #endregion
-
-                    // Response from write modbus time out
-                    #region bAnswer[7] == 06 [hex] --> write multiple register --> modbus time out
-                    else if (bAnswer[7] == 6) // = 06 [hex] --> write multiple register --> modbus time out
-                    {
-                        #region Data to receive
-                        //Data to receive after read input register
-                        //0  1  2  3  4  5  6  7  8  9  10 11
-                        //XX XX XX XX XX XX XX XX XX XX XX XX ....
-                        //Tid   Pid   Len   id fn Offst Data
-
-                        //Tid   --> 00 01 auto incrementData
-                        //Pid   --> 00 00
-                        //Len   --> 00 06
-                        //id    --> FF
-                        //fn    --> 06      --> function code 6
-                        //Offst --> 00 00
-                        //Data  --> 00 01   --> 1 word 
-                        #endregion
-                
-                        try
-                        {
-                            while (i < 12)
-                            {
-                                i += myStream.Read(bAnswer, i, bAnswer.Length);
-                            }                           
-                        }
-                        catch //(Exception ex)
-                        {
-                            LogData("3-Exception while reading response from write modbus timeout");
-                            retryConnection();
-                        }
-                        string sAnswer = GetHexStringfromArrayByte(bAnswer, i);
-                        statusWrite = statusWrite + "Answer write: " + sAnswer;                             
-                    }
-                    #endregion
-
-                    // Retry connection when TIDGap > 1
-                    //#region Retry Connection TIDGap > 1
-                    //if ((tIDWrite - tIDRead) > 1) 
-                    //{
-                    //    LogData("TID Gap: -" + (tIDWrite - tIDRead));
-                    //    retryConnection(); 
-                    //}
-                    //#endregion
-                }
-            }
-            #endregion
-        }
-        #endregion
+        // NOTE: Legacy async Modbus response reader removed (synchronous SendAndProcessResponse is used).
 
         #region Synchronous Modbus response handling
 
@@ -1958,25 +1762,32 @@ namespace CMMTt111
             int total = 0;
             while (total < count)
             {
-                if (setReadTimeOut > 0)
+                // Use the stream's native read timeout: it triggers if no bytes arrive within the timeout.
+                // This is more reliable than a manual "idle" check around a blocking Read call.
+                try
                 {
+                    if (setReadTimeOut > 0)
+                    {
+                        try { myStream.ReadTimeout = setReadTimeOut; } catch { }
+                    }
+
+                    int read = myStream.Read(buffer, offset + total, count - total);
+                    if (read <= 0)
+                    {
+                        throw new IOException("Socket closed");
+                    }
+                    total += read;
+                }
+                catch (IOException)
+                {
+                    // Treat any IO exception during read as a timeout/connection problem.
                     TimeSpan elapsed = DateTime.Now - start;
                     actualReadTime = Convert.ToInt32(elapsed.TotalMilliseconds);
-                    if (actualReadTime >= setReadTimeOut)
-                    {
-                        counterPass++;
-                        LogData("(ReadExact) Read Time Out: " + setReadTimeOut.ToString());
-                        maxReadTime = 0;
-                        throw new IOException("Read timeout");
-                    }
+                    counterPass++;
+                    LogData("(ReadExact) Read Time Out: " + setReadTimeOut.ToString());
+                    maxReadTime = 0;
+                    throw;
                 }
-
-                int read = myStream.Read(buffer, offset + total, count - total);
-                if (read <= 0)
-                {
-                    throw new IOException("Socket closed");
-                }
-                total += read;
             }
             return total;
         }
