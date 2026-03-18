@@ -123,11 +123,15 @@ namespace CMMTt111
         private int tIDRead = 0;        //Receive data transaction Id
         private int icountWritemb = 1;
         private int icountReadmb = 0;
+        private int maxRWGap = 0;
+        private int maxTIDGap = 0;
 
         public int TIDWrite { get { return tIDWrite; } }
         public int TIDRead { get { return tIDRead; } }
         public int iCountWritemb { get { return icountWritemb; } }
         public int iCountReadmb { get { return icountReadmb; } }
+        public int MaxRWGap { get { return maxRWGap; } }
+        public int MaxTIDGap { get { return maxTIDGap; } }
 
         #endregion
 
@@ -613,22 +617,15 @@ namespace CMMTt111
                 LogData(status + "[" + iretryConnection.ToString() + "]");
                 iretryConnection2 = 0; //reset retry connection timeout
                 
-                //activate thread
-                #region Create cycle, write and read thread 
+                //activate worker thread (handles both requests and responses sequentially)
+                #region Create worker thread 
                 if (!ThreadStarted)
                 {
-                    //Cycle
-                    //Write
                     ThreadStart writembRef = new ThreadStart(WritembThread);
                     Thread writembThd = new Thread(writembRef);
                     writembThd.Start();
-                    //Read
-                    ThreadStart readmbRef = new ThreadStart(ReadmbThread);
-                    Thread readmbThd = new Thread(readmbRef);
-                    readmbThd.Start();
-                    //--------------------------------------------
                     ThreadStarted = true;
-                    LogData("Thread Started");
+                    LogData("Worker Thread Started");
                 }
                 #endregion
             }
@@ -699,8 +696,8 @@ namespace CMMTt111
                 //Reset counter
                 icountReadmb = 0;
                 icountWritemb = 1;
-                MaxRWGap = 0;
-                MaxTIDGap = 0;
+                maxRWGap = 0;
+                maxTIDGap = 0;
             }
         }
 
@@ -740,7 +737,7 @@ namespace CMMTt111
             // mode: 1 = homing, 2 = move absolute, 3 = move relative, 4 = record selection
             // cmd:  1 = Go, 2 = stop, 3 = clear, 4 = acknowledge
 
-            if (cmd == 4) { iStep = 0; activeCmd = 0; icnt = 0; maxReadTime = 0; maxWritembTime = 0; maxReadmbTime = 0; MaxTIDGap = 0; }  // when pressed ack button
+            if (cmd == 4) { iStep = 0; activeCmd = 0; icnt = 0; maxReadTime = 0; maxWritembTime = 0; maxReadmbTime = 0; maxTIDGap = 0; maxRWGap = 0; }  // when pressed ack button
             if (cmd != 0 & activeCmd == 0) { activeCmd = cmd; activeMode = mode; }
             if (!OutputStageEnable & activeCmd != 4) { cmmtstatus = "No Output stage enable"; icmmtStatus = 1; }
 
@@ -1156,12 +1153,12 @@ namespace CMMTt111
         }
         #endregion
         
-        #region Thread Writemb
+        #region Thread Writemb (send + receive, single owner of NetworkStream)
 
         DateTime startWritemb = DateTime.Now;
         DateTime endWritemb;
         TimeSpan readWritemb;
-     
+
         private void WritembThread()
         {
             bool xTurn = false;
@@ -1193,7 +1190,7 @@ namespace CMMTt111
                 Thread.Sleep(cycleTime);
 
                 #region Disconnecting..
-                if (disconnecting & xReadSleep) //only when read thread is a sleep then can disconnect
+                if (disconnecting)
                 {
                     connected = false;
                     connectionError = false;
@@ -1229,10 +1226,17 @@ namespace CMMTt111
             //Read 12 word input + extended process data - start address: 30001, Function Code:4
             try
             {
-                if (!connectionError) { queryReadInputRegister(); }
+                if (!connectionError)
+                {
+                    queryReadInputRegister();
+                }
             }
-            catch (Exception ex)
-            { string ex0 = ex.ToString(); }
+            catch (Exception)
+            {
+                // Any exception on read is treated as connection problem
+                LogData("Exception in readInput");
+                retryConnection();
+            }
         }
 
         private void queryReadInputRegister()
@@ -1273,16 +1277,7 @@ namespace CMMTt111
             statusRead = "Query read: " + sQuery + Environment.NewLine;
 
             #region Query & Answer
-            try
-            {
-                myStream.Write(bQuery, 0, 12);                          //12--> send 12 bytes
-                //answerReadInputRegister(numRegIW);
-            }
-            catch //(Exception ex)
-            {
-                LogData("0-Exception while query read");
-                retryConnection();
-            }
+            SendAndProcessResponse(bQuery, 12, 4);
             #endregion
 
             #region Transaction Id
@@ -1464,16 +1459,7 @@ namespace CMMTt111
             statusWrite = "Query write: " + sQuery + Environment.NewLine;
 
             #region Query & Answer
-            try
-            {
-                myStream.Write(bQuery, 0, Convert.ToInt32(13 + numRegOW * 2));    //13 bytes header + numreg*2 bytes
-                //answerWriteHoldingRegister(numRegOW);
-            }
-            catch //(Exception ex)
-            {
-                LogData("0-Exception while query write");
-                retryConnection();
-            }
+            SendAndProcessResponse(bQuery, Convert.ToInt32(13 + numRegOW * 2), 16);
             #endregion
 
             #region Transaction Id
@@ -1546,16 +1532,7 @@ namespace CMMTt111
             statusRead = "Query read: " + sQuery + Environment.NewLine;
 
             #region Query & Answer
-            try
-            {
-                myStream.Write(bQuery, 0, 12);                          //12--> send 12 bytes
-                //answerReadHoldingRegister(numReg);
-            }
-            catch //(Exception ex)
-            {
-                LogData("0-Exception while query read modbus");
-                retryConnection();
-            }
+            SendAndProcessResponse(bQuery, 12, 3);
             #endregion
 
             #region Transaction Id
@@ -1613,15 +1590,9 @@ namespace CMMTt111
             statusWrite = "Query write: " + sQuery + Environment.NewLine;
 
             #region Query & Answer
-            try
+            if (SendAndProcessResponse(bQuery, 12, 6))
             {
-                myStream.Write(bQuery, 0, Convert.ToInt32(12));    //13 bytes header + numreg*2 bytes
-                isComplete = true; // answerWriteSingleRegister();
-            }
-            catch //(Exception ex)
-            {
-                LogData("0-Exception while query write modbus");
-                retryConnection();
+                isComplete = true;
             }
             #endregion
 
@@ -1636,54 +1607,7 @@ namespace CMMTt111
 
         #endregion
 
-        #region Thread Readmb
-
-        DateTime startReadmb = DateTime.Now;
-        DateTime endReadmb;
-        TimeSpan readReadmb;
-        int MaxRWGap = 0;
-        int MaxTIDGap = 0;
-        bool xReadSleep = false;
-     
-        private void ReadmbThread()
-        {
-            while (!exitApplication)
-            {
-                if (connected & !connectionError) /**/
-                {
-                    readmbResponses();
-                    icountReadmb++;
-                }
-                else if (connected & connectionError)
-                {
-                    retryConnection();  
-                }
-
-                xReadSleep = true;
-                // faster cycle time when Gap between Write and read is more than 1
-                if ((tIDWrite - tIDRead) > 1)
-                {
-                    Thread.Sleep(cycleTime/2);
-                    LogData("Thread Read 2x");
-                }
-                else
-                {
-                    Thread.Sleep(cycleTime);
-                }
-                xReadSleep = false;
-
-                #region Actual Readmb Time
-                endReadmb = DateTime.Now;
-                readReadmb = endReadmb - startReadmb;
-                actualReadmbTime = Convert.ToInt32(readReadmb.TotalMilliseconds);
-                if (actualReadmbTime > maxReadmbTime) { maxReadmbTime = actualReadmbTime; }
-
-                startReadmb = DateTime.Now;
-                #endregion
-            
-            }
-        }
-        #endregion
+        // NOTE: Legacy read thread has been replaced by synchronous request/response handling
 
         #region Read Modbus Responses
         private void readmbResponses()
@@ -1925,7 +1849,188 @@ namespace CMMTt111
             }
             #endregion
         }
+        #endregion
 
+        #region Synchronous Modbus response handling
+
+        private bool SendAndProcessResponse(byte[] query, int queryLength, byte expectedFunctionCode)
+        {
+            try
+            {
+                if (myStream == null)
+                {
+                    retryConnection();
+                    return false;
+                }
+
+                myStream.Write(query, 0, queryLength);
+
+                DateTime start = DateTime.Now;
+
+                // Read MBAP header (7 bytes: TID, PID, length, unit id)
+                int bytesRead = ReadExact(bAnswer, 0, 7, start);
+                if (bytesRead != 7)
+                {
+                    LogData("Incomplete MBAP header");
+                    retryConnection();
+                    return false;
+                }
+
+                int len = GetWord(bAnswer[4], bAnswer[5]); // number of remaining bytes (unit id + PDU)
+                if (len < 2 || len > bAnswer.Length - 7)
+                {
+                    LogData("Invalid length in response: " + len.ToString());
+                    retryConnection();
+                    return false;
+                }
+
+                // Read remaining bytes
+                // MBAP length includes UnitId (already read in header), so remaining PDU length is (len - 1)
+                int pduLen = len - 1;
+                bytesRead = ReadExact(bAnswer, 7, pduLen, start);
+                if (bytesRead != pduLen)
+                {
+                    LogData("Incomplete PDU");
+                    retryConnection();
+                    return false;
+                }
+
+                // Update timing info
+                DateTime end = DateTime.Now;
+                TimeSpan readTime = end - start;
+                actualReadTime = Convert.ToInt32(readTime.TotalMilliseconds);
+                if (actualReadTime > maxReadTime) { maxReadTime = actualReadTime; }
+                actualReadmbTime = actualReadTime;
+                if (actualReadmbTime > maxReadmbTime) { maxReadmbTime = actualReadmbTime; }
+
+                // Basic checks
+                tIDRead = GetWord(bAnswer[0], bAnswer[1]);
+                int tidGap = tIDWrite - tIDRead;
+                if (tidGap > maxTIDGap) { maxTIDGap = tidGap; }
+
+                int rwGap = icountWritemb - icountReadmb;
+                if (rwGap > maxRWGap) { maxRWGap = rwGap; }
+                byte fn = bAnswer[7];
+                if (fn == (byte)(expectedFunctionCode | 0x80))
+                {
+                    // Modbus exception response: next byte is exception code
+                    byte exCode = bAnswer[8];
+                    LogData("Modbus exception. Fn: " + expectedFunctionCode.ToString() + " Ex: " + exCode.ToString());
+                    return false;
+                }
+                if (fn != expectedFunctionCode)
+                {
+                    LogData("Unexpected function code. Expected: " + expectedFunctionCode.ToString() + " Got: " + fn.ToString());
+                    return false;
+                }
+
+                // Dispatch based on function code
+                switch (fn)
+                {
+                    case 4: // Read Input Registers
+                        ProcessReadInputResponse();
+                        break;
+                    case 16: // Write Multiple Registers
+                        ProcessWriteMultipleResponse();
+                        break;
+                    case 3: // Read Holding Registers (modbus timeout)
+                        ProcessReadHoldingResponse();
+                        break;
+                    case 6: // Write Single Register (modbus timeout)
+                        ProcessWriteSingleResponse();
+                        break;
+                }
+
+                // Count successful responses
+                icountReadmb++;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogData("Exception in SendAndProcessResponse: " + ex.Message);
+                retryConnection();
+                return false;
+            }
+        }
+
+        private int ReadExact(byte[] buffer, int offset, int count, DateTime start)
+        {
+            int total = 0;
+            while (total < count)
+            {
+                if (setReadTimeOut > 0)
+                {
+                    TimeSpan elapsed = DateTime.Now - start;
+                    actualReadTime = Convert.ToInt32(elapsed.TotalMilliseconds);
+                    if (actualReadTime >= setReadTimeOut)
+                    {
+                        counterPass++;
+                        LogData("(ReadExact) Read Time Out: " + setReadTimeOut.ToString());
+                        maxReadTime = 0;
+                        throw new IOException("Read timeout");
+                    }
+                }
+
+                int read = myStream.Read(buffer, offset + total, count - total);
+                if (read <= 0)
+                {
+                    throw new IOException("Socket closed");
+                }
+                total += read;
+            }
+            return total;
+        }
+
+        private void ProcessReadInputResponse()
+        {
+            // bAnswer layout after full frame:
+            // [0..1] TID, [2..3] PID, [4..5] Len, [6] UnitId, [7] Fn(4), [8] ByteCount, [9..] data
+            int byteCount = bAnswer[8];
+            if (byteCount <= 0) return;
+
+            int firstData = 9;
+            int words = byteCount / 2;
+            for (int j = 0; j < words && j < inW.Length; j++)
+            {
+                inW[j] = GetWord(bAnswer[firstData], bAnswer[firstData + 1]);
+                firstData += 2;
+            }
+
+            string sAnswer = GetHexStringfromArrayByte(bAnswer, 9 + byteCount);
+            statusRead = statusRead + "Answer read: " + sAnswer + Environment.NewLine;
+
+            readInW();
+        }
+
+        private void ProcessWriteMultipleResponse()
+        {
+            // We only use this for diagnostics
+            string sAnswer = GetHexStringfromArrayByte(bAnswer, 12);
+            statusWrite = statusWrite + "Answer write: " + sAnswer;
+        }
+
+        private void ProcessReadHoldingResponse()
+        {
+            // Modbus timeout value, FC3 at offset 400, 1 register
+            // Layout: [..7]=fn, [8]=byteCount(2), [9..10]=data
+            int byteCount = bAnswer[8];
+            if (byteCount < 2) return;
+
+            int firstData = 9;
+            modbusTimeOutCurrent = GetWord(bAnswer[firstData], bAnswer[firstData + 1]);
+
+            string sAnswer = GetHexStringfromArrayByte(bAnswer, 11);
+            statusRead = statusRead + "Answer read: " + sAnswer + Environment.NewLine;
+        }
+
+        private void ProcessWriteSingleResponse()
+        {
+            // FC6 acknowledge; we only keep it for diagnostics
+            string sAnswer = GetHexStringfromArrayByte(bAnswer, 12);
+            statusWrite = statusWrite + "Answer write: " + sAnswer;
+        }
+
+        #endregion
         private void readInW()
         {
             try
@@ -2010,7 +2115,7 @@ namespace CMMTt111
             }
             catch { }
         }
-        #endregion 
+//#endregion
     }
 }
 
