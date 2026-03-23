@@ -11,7 +11,7 @@ namespace CMMTt111
     public class festoCMMT
     {
         #region About & Changelog
-        private string version = "v1.017 - 02/03/2023";
+        private string version = "v1.10 - 26/03/2026";
         public string Version { get { return version; } }
         // --------------------------------------------------------------------- 
         // Version v0.9 initial release, beta
@@ -19,6 +19,16 @@ namespace CMMTt111
         // modifying source code? Credit to: mRH
         // ---------------------------------------------------------------------
         // Changelog:
+        // ---------------------------------------------------------------------
+        // Version v1.10
+        // 26/03/2026
+        // Communication stability update for long-running ModbusTCP operation.
+        // - fixed output-word sizing (NoOW) and reconnect parameter handling
+        // - switched to deterministic request/response parsing with MBAP length fix
+        // - added resilient reconnect state machine with retry backoff
+        // - prioritized cyclic output updates to avoid drive watchdog fault 391
+        // - improved timeout handling, enforced minimum read timeout and process-data cap
+        // - added stream desync recovery by draining leftover bytes after timeout/mismatch
         // ---------------------------------------------------------------------
         // Version v1.017
         // 02/03/2023
