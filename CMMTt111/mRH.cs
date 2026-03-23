@@ -119,6 +119,7 @@ namespace CMMTt111
         private const int ReconnectBackoffMaxMs = 5000;
         private DateTime lastModbusTimeoutUpdateUtc = DateTime.MinValue;
         private const int ModbusTimeoutUpdateIntervalMs = 1000;
+        private const int ProcessDataMaxReadTimeoutMs = 300;
 
         #endregion
 
@@ -1687,9 +1688,16 @@ namespace CMMTt111
                 myStream.Write(query, 0, queryLength);
 
                 DateTime start = DateTime.Now;
+                int readTimeoutMs = setReadTimeOut;
+                // For process data reads we must not block outputs too long,
+                // otherwise the drive process-data watchdog (391) may trigger.
+                if (expectedFunctionCode == 4 || expectedFunctionCode == 3)
+                {
+                    readTimeoutMs = Math.Min(setReadTimeOut, ProcessDataMaxReadTimeoutMs);
+                }
 
                 // Read MBAP header (7 bytes: TID, PID, length, unit id)
-                int bytesRead = ReadExact(bAnswer, 0, 7, start);
+                int bytesRead = ReadExact(bAnswer, 0, 7, start, readTimeoutMs);
                 if (bytesRead != 7)
                 {
                     LogData("Incomplete MBAP header");
@@ -1708,7 +1716,7 @@ namespace CMMTt111
                 // Read remaining bytes
                 // MBAP length includes UnitId (already read in header), so remaining PDU length is (len - 1)
                 int pduLen = len - 1;
-                bytesRead = ReadExact(bAnswer, 7, pduLen, start);
+                bytesRead = ReadExact(bAnswer, 7, pduLen, start, readTimeoutMs);
                 if (bytesRead != pduLen)
                 {
                     LogData("Incomplete PDU");
@@ -1742,6 +1750,13 @@ namespace CMMTt111
                 if (fn != expectedFunctionCode)
                 {
                     LogData("Unexpected function code. Expected: " + expectedFunctionCode.ToString() + " Got: " + fn.ToString());
+                    // We likely desynchronized due to a previous partial read/timeout.
+                    // Drain any remaining bytes currently available so the next request can resync.
+                    DrainAvailableSocketBytes(4096);
+                    if (expectedFunctionCode == 16 || expectedFunctionCode == 6)
+                    {
+                        retryConnection();
+                    }
                     return false;
                 }
 
@@ -1772,6 +1787,9 @@ namespace CMMTt111
                 // Reads timing out should not immediately drop cyclic outputs; treat as best-effort.
                 if (expectedFunctionCode == 4 || expectedFunctionCode == 3)
                 {
+                    // A timed-out read may have consumed part of a response frame.
+                    // Drain leftover bytes to avoid parsing misalignment on the next request.
+                    DrainAvailableSocketBytes(4096);
                     return false;
                 }
 
@@ -1786,7 +1804,26 @@ namespace CMMTt111
             }
         }
 
-        private int ReadExact(byte[] buffer, int offset, int count, DateTime start)
+        private void DrainAvailableSocketBytes(int maxTotalBytes)
+        {
+            try
+            {
+                if (myStream == null) return;
+                byte[] tmp = new byte[512];
+                int drained = 0;
+                // Drain only what is already available (non-blocking).
+                while (drained < maxTotalBytes && myStream.DataAvailable)
+                {
+                    int toRead = Math.Min(tmp.Length, maxTotalBytes - drained);
+                    int read = myStream.Read(tmp, 0, toRead);
+                    if (read <= 0) break;
+                    drained += read;
+                }
+            }
+            catch { }
+        }
+
+        private int ReadExact(byte[] buffer, int offset, int count, DateTime start, int timeoutMs)
         {
             int total = 0;
             while (total < count)
@@ -1795,9 +1832,9 @@ namespace CMMTt111
                 // This is more reliable than a manual "idle" check around a blocking Read call.
                 try
                 {
-                    if (setReadTimeOut > 0)
+                    if (timeoutMs > 0)
                     {
-                        try { myStream.ReadTimeout = setReadTimeOut; } catch { }
+                        try { myStream.ReadTimeout = timeoutMs; } catch { }
                     }
 
                     int read = myStream.Read(buffer, offset + total, count - total);
@@ -1813,7 +1850,7 @@ namespace CMMTt111
                     TimeSpan elapsed = DateTime.Now - start;
                     actualReadTime = Convert.ToInt32(elapsed.TotalMilliseconds);
                     counterPass++;
-                    LogData("(ReadExact) Read Time Out: " + setReadTimeOut.ToString());
+                    LogData("(ReadExact) Read Time Out: " + timeoutMs.ToString());
                     maxReadTime = 0;
                     throw;
                 }
