@@ -11,4 +11,4 @@ git clone <git-url> <destination>
 ```
 2. Open existing Project inside Visual Studio
 3. Select CMMT-EP ModbusTCP from example folder
-4. Run application
+4. Compile & Run application
