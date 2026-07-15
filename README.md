@@ -1,14 +1,14 @@
-Improved ModbusTCP communication stability for CMMT (CMMTt111)
+# CMMTt111dll
+CMMTt111dll is a C# written library for controlling FESTO drives from the product family CMMT. library is using the ModbusTCP communication interface from CMMT drives and Telegram 111. Documentation can be found [here](https://github.com/MarkusFesto/CMMT111dll/tree/main/doc) and in the [examples](./examples) directory
 
-This release improves long-running communication stability between the application and CMMT over ModbusTCP.
 
-What is improved:
-Significantly better resistance against intermittent communication dropouts.
-Improved automatic recovery behavior after temporary communication disturbances.
-More stable cyclic process-data handling to prevent drive-side communication watchdog faults.
+## Installation
+### From git repo
+1. Clone the repository
 
-User impact:
-Existing application integration remains compatible.
-No functional workflow changes required for normal usage.
-Reliability during long-duration runtime is improved.
-
+```
+git clone <git-url> <destination>
+```
+2. Open existing Project inside Visual Studio
+3. Select CMMT-EP ModbusTCP from example folder
+4. Run application
