@@ -1,9 +1,0 @@
-build
-Framework
-DevPackages
-.vs
-bin
-obj
-Properties
-*.sln
-*.csproj
