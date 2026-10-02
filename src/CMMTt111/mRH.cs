@@ -1,3 +1,5 @@
+//SPDX-FileCopyrightText: 2026 Festo SE & Co. KG
+
 using System;
 using System.Threading;
 using System.Net;  //basic function for ip adressing
@@ -273,8 +275,8 @@ namespace CMMTt111
         #endregion
 
         #region IO
-        private int[] inW = new int[30]; //new int[12];
-        private int[] outW = new int[30]; // new int[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ,0, 0, 0, 0, 0, 0, 0 };
+        private int[] inW = new int[30]; 
+        private int[] outW = new int[30]; 
 
         public int[] InW { get { return inW; } }
         public int[] OutW { get { return outW; } set { outW = value; } }
@@ -525,12 +527,7 @@ namespace CMMTt111
 
         private void CreateLogFile()
         {
-            //string LogFile = DateTime.Now.ToString("yy") +
-            //                 DateTime.Now.ToString("MM") +
-            //                 DateTime.Now.ToString("dd") +
-            //                 DateTime.Now.ToString("HH") +
-            //                 DateTime.Now.ToString("mm") +
-            //                 ".mrh";
+            
             string LogFile = "log.mrh";
 
             try
@@ -555,12 +552,7 @@ namespace CMMTt111
                     writer.WriteLine(sav);
                 }
 
-                //Clean variable
-                //for (int i = 0; i < 1000; i++)
-                //{
-                //    sLogLine[i] = "";
-                //    iLogLine = 0;
-                //}
+
             }
             catch { }
         }
@@ -1272,11 +1264,7 @@ namespace CMMTt111
                 }
 
                 // the thread is paused for 50 milliseconds
-                //iWaitRead = 1 + MaxRWGap / 5; 
-                //if ((TIDWrite - TIDRead) < 3)
-                //{ iWaitRead = 1; } else { iWaitRead = 2; LogData("Write Time x 2"); }
-
-                //Thread.Sleep(cycleTime * iWaitRead);
+                
 
                 Thread.Sleep(cycleTime);
 

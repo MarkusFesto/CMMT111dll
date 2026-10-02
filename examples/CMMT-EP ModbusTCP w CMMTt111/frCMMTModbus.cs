@@ -1,4 +1,6 @@
-﻿using System;
+﻿//SPDX-FileCopyrightText: 2026 Festo SE & Co. KG
+
+using System;
 using System.Threading;
 using System.Collections;
 using System.Collections.Generic;
@@ -21,10 +23,7 @@ namespace CMMT_EP_ModbusTCP
         string unitpos = "";
         string unitvel = "";
         string CmmtStatus = "";
-        //string HomingStatus = "";
-        //string MoveAbsoluteStatus = "";
-        //string MoveRelativeStatus = "";
-        //string RecordSelectionStatus = "";
+      
         public int cycleTime = 10;
         private int iStepTest = 0;
         #endregion
@@ -113,7 +112,7 @@ namespace CMMT_EP_ModbusTCP
                     lbStatus.Text = "Connecting..";
                     ExtendedIW = byte.Parse(txExtendedIW.Text);
                     ExtendedOW = byte.Parse(txExtendedOW.Text);
-                    //festoCMMT.cycleTime = cycleTime;
+                    
 
                     festoCMMT.Connect(txIPAddress.Text, ExtendedIW, ExtendedOW);
                     if (festoCMMT.Connected)
@@ -288,7 +287,6 @@ namespace CMMT_EP_ModbusTCP
 " | ACTr: " + festoCMMT.ActualReadmbTime +
 " | ACTw: " + festoCMMT.ActualWritembTime +
 " (ms)" +
-//" | R-W: " + (festoCMMT.iCountReadmb - festoCMMT.iCountWritemb) +
 " | TIDGap: " + (festoCMMT.TIDRead - festoCMMT.TIDWrite);
             }
             #endregion
@@ -655,8 +653,7 @@ namespace CMMT_EP_ModbusTCP
                 txModbusTimeOut.Text = savsplit[16];
                 timeouttime();
                 tCycle.Interval = cycleTime;
-                //cbUploadPath.Checked = bool.Parse(savsplit[16]);
-                //cbPath.SelectedIndex = int.Parse(savsplit[17]);            
+                         
             }
             catch { }
         }
@@ -681,8 +678,7 @@ namespace CMMT_EP_ModbusTCP
                 savsplit[14] = txTimeWait.Text;
                 savsplit[15] = txHomingTimeOut.Text;
                 savsplit[16] = txModbusTimeOut.Text;
-                //savsplit[16] = cbCheckLimit.Checked.ToString();
-                //savsplit[17] = cbPath.SelectedIndex.ToString();
+                
             }
             catch { }
 
